@@ -1,6 +1,6 @@
 services:
   lobe:
-    image: ghcr.io/Lance00627/lobe-chat-db-with-clerk:latest
+    image: ghcr.io/lance00627/lobe-chat-db-with-clerk:latest
     container_name: lobe-chat
     ports:
       - "3210:3210"
