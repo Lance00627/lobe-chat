@@ -1,0 +1,66 @@
+# Build a Clerk-enabled image by rebuilding the app with NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY baked in
+
+ARG NODEJS_VERSION="24"
+FROM node:${NODEJS_VERSION}-slim AS builder
+
+ARG USE_CN_MIRROR
+ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+ARG NEXT_PUBLIC_SERVICE_MODE
+ARG NEXT_PUBLIC_ENABLE_NEXT_AUTH
+
+ENV DEBIAN_FRONTEND="noninteractive"
+ENV NODE_OPTIONS="--max-old-space-size=8192"
+
+RUN \
+    if [ "${USE_CN_MIRROR:-false}" = "true" ]; then \
+    sed -i "s/deb.debian.org/mirrors.ustc.edu.cn/g" "/etc/apt/sources.list.d/debian.sources"; \
+    fi \
+    && apt update \
+    && apt install -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy workspace
+COPY package.json pnpm-workspace.yaml .npmrc ./
+COPY packages ./packages
+COPY . .
+
+# Enable corepack & install deps
+RUN npm i -g corepack@latest \
+    && corepack enable \
+    && corepack use $(sed -n 's/.*"packageManager": "\(.*\)".*/\1/p' package.json) \
+    && pnpm i
+
+# Bake required NEXT_PUBLIC variables for client at build time
+ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}" \
+    NEXT_PUBLIC_SERVICE_MODE="${NEXT_PUBLIC_SERVICE_MODE:-server}" \
+    NEXT_PUBLIC_ENABLE_NEXT_AUTH="${NEXT_PUBLIC_ENABLE_NEXT_AUTH:-0}"
+
+# Minimal server env placeholders for build
+ENV APP_URL="http://app.local" \
+    DATABASE_URL="postgres://postgres:password@localhost:5432/postgres" \
+    KEY_VAULTS_SECRET="use-for-build"
+
+# Build docker standalone output
+RUN npm run build:docker
+
+FROM node:24-slim AS runtime
+WORKDIR /app
+
+# Copy standalone build output and required runtime files
+COPY --from=builder /app/.next/standalone /app/
+COPY --from=builder /app/packages/database/migrations /app/migrations
+COPY --from=builder /app/scripts/migrateServerDB/docker.cjs /app/docker.cjs
+COPY --from=builder /app/scripts/migrateServerDB/errorHint.js /app/errorHint.js
+COPY --from=builder /app/scripts/serverLauncher/startServer.js /app/startServer.js
+
+# Ensure /bin/node exists for startServer.js spawning
+RUN ln -sf "$(command -v node)" /bin/node
+
+ENV NODE_ENV=production HOSTNAME="0.0.0.0" PORT="3210"
+
+EXPOSE 3210/tcp
+CMD ["node","/app/startServer.js"]
+
+
